@@ -1,0 +1,118 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# FullStack Python Demo
+#   - FastAPI backend (async SQLAlchemy, JWT auth, Celery tasks)
+#   - Streamlit frontend (multi-page dashboard)
+#   - Redis (Celery broker + result backend)
+#   - SQLite data persistence (volumes for dev)
+# ---------------------------------------------------------------------------
+
+x-common-env: &common-env
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONPATH: "/app"
+
+services:
+  # =========================================================================
+  # Backend (FastAPI)
+  # =========================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fullstack-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - backend/.env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///app/fullstack.db
+      TASK_STORAGE_URL: sqlite+aiosqlite:///app/tasks.db
+      ALLOWED_ORIGINS: "http://localhost:8501,http://127.0.0.1:8501,http://frontend:8501"
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - backend-data:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # =========================================================================
+  # Celery worker (background tasks)
+  # =========================================================================
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: fullstack-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.tasks.worker:app", "worker", "-l", "info", "-Q", "default,report,cleanup,ai"]
+    env_file:
+      - backend/.env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///app/fullstack.db
+      TASK_STORAGE_URL: sqlite+aiosqlite:///app/tasks.db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - backend-data:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  # =========================================================================
+  # Frontend (Streamlit)
+  # =========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: fullstack-frontend
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file:
+      - frontend/.env
+    environment:
+      BACKEND_URL: "http://backend:8000"
+      API_V1_PREFIX: "/api/v1"
+    volumes:
+      - frontend-data:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # =========================================================================
+  # Redis (Celery broker + result backend)
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: fullstack-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  backend-data:
+  frontend-data:
+  redis-data:
